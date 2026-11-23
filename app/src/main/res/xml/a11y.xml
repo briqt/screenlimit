@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  canRetrieveWindowContent 从 false 改为 true：防拆功能（看守系统设置）要读当前窗口
+  文本，才能分辨「进了系统设置的哪个子页」——是无障碍设置、卸载弹窗、还是某个应用的
+  应用信息页。仅凭包名区分不了（这些页面都在 com.android.settings 里）。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100" />

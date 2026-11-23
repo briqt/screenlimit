@@ -1,0 +1,16 @@
+.*
+!.gitignore
+!/.github/
+
+build/
+/local.properties
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.iml
+*.jks
+*.keystore
+dist/
+server/server

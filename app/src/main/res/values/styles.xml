@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 固定浅色（2026-09-23 用户要求：设置页、拦截页、管理端统一成同一套浅色样式，不再跟随系统深色）。
+         forceDarkAllowed=false：MIUI/ColorOS 的「强制深色」也别来反色。 -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.Light">
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowBackground">@color/surface</item>
+        <item name="android:colorPrimary">@color/primary</item>
+        <item name="android:colorAccent">@color/primary</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <!-- 不让对话框落回厂商 DeviceDefault（MIUI 上是一套褐/灰配色，与本应用色板完全不搭） -->
+        <item name="android:alertDialogTheme">@style/AppDialog</item>
+        <item name="android:datePickerDialogTheme">@style/AppDialog</item>
+        <item name="android:timePickerDialogTheme">@style/AppDialog</item>
+    </style>
+
+    <!--
+      对话框基于 AOSP Theme.Material 而非 Theme.DeviceDefault：
+      DeviceDefault 会被厂商 overlay 换掉配色（真机实测 MIUI 给的是褐底奶油字），
+      Material 是框架内置、各机型一致，再用语义色板覆盖关键角色。
+    -->
+    <style name="AppDialog" parent="@android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">@color/primary</item>
+        <item name="android:colorPrimary">@color/primary</item>
+        <item name="android:windowBackground">@color/surface_container</item>
+        <item name="android:colorBackground">@color/surface_container</item>
+        <item name="android:textColorPrimary">@color/text_hi</item>
+        <item name="android:textColorSecondary">@color/text_mid</item>
+        <item name="android:textColorAlertDialogListItem">@color/text_hi</item>
+        <item name="android:timePickerStyle">@style/AppTimePicker</item>
+        <!-- 输入框下划线/光标：不指定会吃到厂商的橙色 control 色 -->
+        <item name="android:colorControlActivated">@color/primary</item>
+        <item name="android:colorControlNormal">@color/text_low</item>
+        <item name="android:textColorHint">@color/text_low</item>
+    </style>
+
+    <!--
+      时间选择器：Material 默认头部/表盘吃的是主题的 colorAccent 与内置灰，
+      在深色下会出现"灰头 + 灰表盘"。这里逐个角色显式指定到语义色板。
+      只定义一份：引用的 @color/* 自己会走 values-night，夜间无需重复。
+    -->
+    <style name="AppTimePicker" parent="@android:style/Widget.Material.TimePicker">
+        <!-- 头部与选中项都用浅底：MIUI 上头部数字固定是深色字，压在主色上看不清（真机实测，反色属性不生效） -->
+        <item name="android:headerBackground">@color/surface_container_high</item>
+        <item name="android:numbersBackgroundColor">@color/surface_container_high</item>
+        <item name="android:numbersTextColor">@color/text_hi</item>
+        <item name="android:numbersInnerTextColor">@color/text_mid</item>
+        <item name="android:numbersSelectorColor">@color/primary_container</item>
+    </style>
+</resources>

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 远程授权要访问自建服务端。v0.7.2 之前漏了这条，导致 F3.3 从来就不可能工作
+         （真机日志：android_getaddrinfo failed: EPERM），只是服务端一直没实现所以没暴露。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!-- 不声明这条，ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 会被系统那个 Activity
+         直接 finish 掉（不抛异常，所以 catch 也兜不住）——表现就是"点了没反应"。 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme"
+        android:supportsRtl="true">
+
+        <!--
+          MainActivity 本身不带 LAUNCHER：桌面入口在下面的 activity-alias 上。
+          v0.12.0 曾用禁用 alias 来「隐藏桌面图标」，OPPO 实测会把管理者自己锁在外面，已废弃，
+          alias 现在恒为 enabled（RemoteConfig.ensureIconVisible 负责把老版本藏过的恢复回来）。
+          v0.12.2 去掉了 excludeFromRecents：藏起卡片等于放弃 ColorOS 的「最近任务里加锁」，
+          而没加锁的应用正是内存管理第一个杀的——保活比"别被顺手划掉"重要。划掉的情况由
+          MonitorService.onTaskRemoved + Watchdog 兜。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 桌面图标入口，恒为启用。 -->
+        <activity-alias
+            android:name=".LauncherAlias"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <service
+            android:name=".MonitorService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="screen_time_limiter" />
+        </service>
+
+        <service
+            android:name=".AccessibilityMonitor"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/a11y" />
+        </service>
+
+        <!-- 看门狗闹钟：定期确认监控服务还在，被杀就拉回来。 -->
+        <receiver
+            android:name=".Watchdog"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.briqt.screenlimit.WATCHDOG" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

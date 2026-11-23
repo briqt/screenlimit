@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  语义色板（浅色）。规则：代码里只引用语义名，不写字面色值；
+  固定浅色，没有 values-night（2026-09-23 起不跟随系统深色）。
+-->
+<resources>
+    <!-- 品牌主色：守护蓝 -->
+    <color name="primary">#3B6FE0</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="primary_container">#DCE4FF</color>
+    <color name="on_primary_container">#16306E</color>
+
+    <!-- 表面层级：surface(页面) < container(卡片) < container_high(卡片内嵌) -->
+    <color name="surface">#F4F5F8</color>
+    <color name="surface_container">#FFFFFF</color>
+    <color name="surface_container_high">#EDEFF4</color>
+
+    <!-- 文字三级 -->
+    <color name="text_hi">#1A1D24</color>
+    <color name="text_mid">#5B6170</color>
+    <color name="text_low">#9AA0AD</color>
+
+    <!-- 描边 -->
+    <color name="outline">#DDE1E9</color>
+    <color name="outline_variant">#EAEDF2</color>
+
+    <!-- 状态：ok=已就绪/放行，warn=有配额/待处理，danger=缺失/禁止 -->
+    <color name="ok">#2E9E63</color>
+    <color name="ok_container">#D8F0E2</color>
+    <color name="warn">#B8720E</color>
+    <color name="warn_container">#FCEBCF</color>
+    <color name="danger">#D4493E</color>
+    <color name="danger_container">#FBDEDB</color>
+
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 管理端图标背景用更深的蓝，和守护端的 #3B6FE0 盾牌区分开。固定色，不跟随明暗。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#16306E" />
+</shape>

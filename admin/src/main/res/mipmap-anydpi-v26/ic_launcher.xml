@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- minSdk 29，只需自适应图标一份（API 26 起支持），无需各 dpi 位图。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_bg" />
+    <foreground android:drawable="@drawable/ic_shield" />
+    <monochrome android:drawable="@drawable/ic_shield" />
+</adaptive-icon>
