@@ -29,6 +29,7 @@
 |---|---|---|
 | `POST` | `/api/admin/login` | `{user,password}` → `{token}`（PBKDF2-HMAC-SHA256 12 万轮校验，失败限速） |
 | `GET` | `/api/admin/requests` | 获取待审批请求列表（响应不含敏感口令） |
+| `GET` | `/api/admin/events` | SSE 实时审批事件流（建连立推全量快照，申请/审批/取消实时推送，45 秒心跳保活） |
 | `POST` | `/api/admin/approve` | `{id,password}` 批准解锁 |
 | `POST` | `/api/admin/deny` | `{id}` 拒绝申请 |
 | `GET` | `/api/admin/config` | 读取当前配置与设备上报的应用列表 |

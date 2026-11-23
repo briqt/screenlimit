@@ -3,6 +3,9 @@ package com.briqt.screenlimit.admin;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import java.util.HashSet;
+import java.util.Set;
+
 /** 管理端自己的登录态。和守护端的 SharedPreferences 不是同一份，也不是同一个包。 */
 final class Session {
     private static final String FILE = "admin";
@@ -70,5 +73,20 @@ final class Session {
 
     static void setSavedPin(Context c, String pin) {
         sp(c).edit().putString("saved_pin", pin == null ? "" : pin.trim()).apply();
+    }
+
+    /**
+     * 已经发过通知的 pending 申请 ID 集合。
+     * 服务重启或切网重连收到全量快照时：未在此集合的 pending 立即提醒（不漏首单），
+     * 已在此集合的不重复响铃，不再处于 pending 的移出集合并撤销旧通知。
+     */
+    static synchronized Set<String> notifiedIds(Context c) {
+        Set<String> raw = sp(c).getStringSet("notified_ids", null);
+        return raw == null ? new HashSet<>() : new HashSet<>(raw);
+    }
+
+    static synchronized void saveNotifiedIds(Context c, Set<String> ids) {
+        sp(c).edit().putStringSet("notified_ids",
+                ids == null ? new HashSet<>() : new HashSet<>(ids)).apply();
     }
 }

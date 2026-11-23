@@ -29,8 +29,8 @@ Android 屏幕使用时间管理工具。**时段驱动 + 默认禁止 + 白/灰
 
 | 目录 | 说明 | 当前版本 |
 |---|---|---|
-| `app/` | 守护端 `com.briqt.screenlimit`：前台判定、全屏拦截、密码门设置页、系统设置看守防拆、可信时钟 | `v0.14.1` |
-| `admin/` | 管理端 `com.briqt.screenlimit.admin`：待审批列表一键批准/拒绝、远程规则差异预览与下发 | `v0.3.1` |
+| `app/` | 守护端 `com.briqt.screenlimit`：前台判定、全屏拦截、密码门设置页、系统设置看守防拆、可信时钟 | `v0.15.0` |
+| `admin/` | 管理端 `com.briqt.screenlimit.admin`：SSE 实时审批推送、强提醒弹窗与快捷审批、远程规则差异预览与下发 | `v0.4.0` |
 | `server/` | 远程授权与配置服务端（Go 纯标准库单体，内置管理网页与 PWA，见 [server/README.md](server/README.md)） | — |
 
 守护端与管理端均采用 **Java 17 + Android 平台原生 View 纯代码构建，零第三方依赖**（`minSdk 29` / `targetSdk 35`）。

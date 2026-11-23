@@ -74,6 +74,30 @@ final class Api {
         return call(Session.base(c), Session.token(c), "POST", "/api/admin/config", body.toString());
     }
 
+    /**
+     * 打开 {@code GET /api/admin/events} SSE 长连接。
+     * 仅完成请求头与超时配置后即返回连接对象，供调用方保存引用以便随时从外部 {@code disconnect()} 打断阻塞读。
+     */
+    static HttpURLConnection openEvents(Context c) throws Err {
+        String base = Session.base(c);
+        String token = Session.token(c);
+        if (base.isEmpty()) throw new Err(0, "还没有填写服务器地址");
+        if (token.isEmpty()) throw new Err(401, "未登录");
+        try {
+            HttpURLConnection conn = (HttpURLConnection) new URL(base + "/api/admin/events").openConnection();
+            conn.setConnectTimeout(12_000);
+            conn.setReadTimeout(90_000);
+            conn.setUseCaches(false);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "text/event-stream");
+            conn.setRequestProperty("Cache-Control", "no-cache");
+            conn.setRequestProperty("Authorization", "Bearer " + token);
+            return conn;
+        } catch (Exception e) {
+            throw new Err(0, e.getMessage() == null ? "网络失败" : e.getMessage());
+        }
+    }
+
     private static JSONObject call(String base, String token, String method, String path, String json) throws Err {
         if (base == null || base.isEmpty()) throw new Err(0, "还没有填写服务器地址");
         HttpURLConnection conn = null;

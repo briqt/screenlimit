@@ -1,12 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func newTestMux(t *testing.T) (*server, *http.ServeMux) {
@@ -16,16 +24,19 @@ func newTestMux(t *testing.T) (*server, *http.ServeMux) {
 		t.Fatal(err)
 	}
 	s := &server{
-		st:        st,
-		devToken:  "0123456789abcdef",
-		csrf:      "csrf-token",
-		cred:      newAdminCred("admin", "password1"),
-		jwtSecret: bytes.Repeat([]byte{7}, 32),
+		st:           st,
+		devToken:     "0123456789abcdef",
+		csrf:         "csrf-token",
+		cred:         newAdminCred("admin", "password1"),
+		jwtSecret:    bytes.Repeat([]byte{7}, 32),
+		subs:         make(map[chan struct{}]struct{}),
+		pingInterval: defaultPingInterval,
 	}
 	mux := http.NewServeMux()
 	s.registerAdminAPI(mux)
 	mux.HandleFunc("/api/request", s.handleRequest)
 	mux.HandleFunc("/api/poll", s.handlePoll)
+	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	return s, mux
 }
@@ -243,4 +254,381 @@ func TestDevStateDrivesViewAndDelta(t *testing.T) {
 	if out.Changed || s.st.d.Cfg.Version != v0 {
 		t.Fatalf("no-op save bumped version")
 	}
+}
+
+func TestAdminEventsUnauthorizedAndMethod(t *testing.T) {
+	_, mux := newTestMux(t)
+	if rr := doJSON(mux, "GET", "/api/admin/events", "", nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: got %d", rr.Code)
+	}
+	if rr := doJSON(mux, "GET", "/api/admin/events", "invalid-token", nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("bad token: got %d", rr.Code)
+	}
+	tok := login(t, mux)
+	if rr := doJSON(mux, "POST", "/api/admin/events", tok, nil); rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("post method: got %d", rr.Code)
+	}
+}
+
+func TestAdminRequestsAvoidsUnneededDiskWrite(t *testing.T) {
+	s, mux := newTestMux(t)
+	tok := login(t, mux)
+
+	// 无过期记录时，GET /api/admin/requests 不应触发写盘创建 state.json
+	rr := doJSON(mux, "GET", "/api/admin/requests", tok, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get requests: %d", rr.Code)
+	}
+	if _, err := os.Stat(s.st.path); !os.IsNotExist(err) {
+		t.Fatalf("unexpected state write on clean gc, err=%v", err)
+	}
+
+	// 塞入一条已过期的申请后，GET 触发 gc 清理并落盘
+	s.st.mu.Lock()
+	s.st.d.Reqs["old"] = &Request{
+		ID: "old", Pkg: "com.example.old", App: "旧申请",
+		Created: time.Now().Add(-requestTTL - time.Minute), State: statePending,
+	}
+	s.st.mu.Unlock()
+
+	rr = doJSON(mux, "GET", "/api/admin/requests", tok, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get requests after expire: %d", rr.Code)
+	}
+	if _, err := os.Stat(s.st.path); err != nil {
+		t.Fatalf("expected state save when expired item cleaned: %v", err)
+	}
+}
+
+type sseSnapshot struct {
+	Pending int       `json:"pending"`
+	Reqs    []reqView `json:"reqs"`
+}
+
+type sseStream struct {
+	lines  chan string
+	errs   chan error
+	cancel context.CancelFunc
+	resp   *http.Response
+}
+
+func openSSE(t *testing.T, baseURL, tok string) *sseStream {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/admin/events", nil)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("connect sse: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+		t.Fatalf("sse status %d: %s", resp.StatusCode, string(b))
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream; charset=utf-8" {
+		_ = resp.Body.Close()
+		cancel()
+		t.Fatalf("unexpected Content-Type: %q", ct)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache, no-transform" {
+		_ = resp.Body.Close()
+		cancel()
+		t.Fatalf("unexpected Cache-Control: %q", cc)
+	}
+	if xb := resp.Header.Get("X-Accel-Buffering"); xb != "no" {
+		_ = resp.Body.Close()
+		cancel()
+		t.Fatalf("unexpected X-Accel-Buffering: %q", xb)
+	}
+
+	st := &sseStream{
+		lines:  make(chan string, 32),
+		errs:   make(chan error, 1),
+		cancel: cancel,
+		resp:   resp,
+	}
+	go func() {
+		rd := bufio.NewReader(resp.Body)
+		for {
+			line, err := rd.ReadString('\n')
+			if err != nil {
+				st.errs <- err
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				continue
+			}
+			st.lines <- line
+		}
+	}()
+	return st
+}
+
+func (st *sseStream) close() {
+	st.cancel()
+	_ = st.resp.Body.Close()
+}
+
+func (st *sseStream) nextData(t *testing.T) (sseSnapshot, string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case line := <-st.lines:
+			if strings.HasPrefix(line, ":") {
+				continue
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				t.Fatalf("unexpected sse line: %q", line)
+			}
+			raw := strings.TrimPrefix(line, "data: ")
+			var snap sseSnapshot
+			if err := json.Unmarshal([]byte(raw), &snap); err != nil {
+				t.Fatalf("bad sse json %q: %v", raw, err)
+			}
+			return snap, raw
+		case err := <-st.errs:
+			t.Fatalf("sse stream closed unexpectedly: %v", err)
+		case <-deadline:
+			t.Fatal("timeout waiting for sse data event")
+		}
+	}
+}
+
+func (st *sseStream) waitForPing(t *testing.T) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case line := <-st.lines:
+			if line == ": ping" {
+				return
+			}
+		case err := <-st.errs:
+			t.Fatalf("sse stream closed while waiting for ping: %v", err)
+		case <-deadline:
+			t.Fatal("timeout waiting for sse ping")
+		}
+	}
+}
+
+func postAPI(t *testing.T, baseURL, path string, headers map[string]string, body any) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+path, bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST %s got %d: %s", path, resp.StatusCode, string(raw))
+	}
+}
+
+func TestAdminEventsStreamLifecycleAndHeartbeat(t *testing.T) {
+	s, mux := newTestMux(t)
+	s.pingInterval = 45 * time.Millisecond
+
+	// 刻意把服务端 WriteTimeout 设得很短（200ms），验证 ResponseController.SetWriteDeadline 能续期长连接
+	ts := httptest.NewUnstartedServer(secHeaders(mux))
+	ts.Config.WriteTimeout = 200 * time.Millisecond
+	ts.Start()
+	defer ts.Close()
+
+	tok := login(t, mux)
+	stream := openSSE(t, ts.URL, tok)
+	defer stream.close()
+
+	// 1. 建连后立即收到初始空快照
+	snap, _ := stream.nextData(t)
+	if snap.Pending != 0 || len(snap.Reqs) != 0 {
+		t.Fatalf("initial snapshot want empty, got %+v", snap)
+	}
+
+	devHdr := map[string]string{"X-Device-Token": s.devToken}
+	admHdr := map[string]string{"Authorization": "Bearer " + tok}
+
+	// 2. 设备发起申请 -> 实时收到 pending 快照
+	postAPI(t, ts.URL, "/api/request", devHdr, map[string]any{
+		"id": "r1", "pkg": "com.example.demo", "app": "示例应用（申请 15 分钟）", "ts": 1,
+	})
+	snap, _ = stream.nextData(t)
+	if snap.Pending != 1 || len(snap.Reqs) != 1 || snap.Reqs[0].ID != "r1" || snap.Reqs[0].State != "pending" {
+		t.Fatalf("after request: %+v", snap)
+	}
+
+	// 3. 管理端批准 -> 实时收到 approved 快照，且不泄露口令
+	postAPI(t, ts.URL, "/api/admin/approve", admHdr, map[string]string{
+		"id": "r1", "password": "654321",
+	})
+	snap, raw := stream.nextData(t)
+	if snap.Pending != 0 || len(snap.Reqs) != 1 || snap.Reqs[0].State != "approved" {
+		t.Fatalf("after approve: %+v", snap)
+	}
+	if strings.Contains(raw, "654321") || strings.Contains(raw, "password") {
+		t.Fatalf("password leaked in sse payload: %s", raw)
+	}
+
+	// 4. 设备取消申请 -> 实时收到移除后的快照
+	postAPI(t, ts.URL, "/api/cancel", devHdr, map[string]string{"id": "r1"})
+	snap, _ = stream.nextData(t)
+	if snap.Pending != 0 || len(snap.Reqs) != 0 {
+		t.Fatalf("after cancel: %+v", snap)
+	}
+
+	// 5. 连续等待多次心跳，跨越服务端 200ms WriteTimeout 后仍不断流且可继续收事件
+	for range 6 {
+		stream.waitForPing(t)
+	}
+	postAPI(t, ts.URL, "/api/request", devHdr, map[string]any{
+		"id": "r2", "pkg": "com.example.reader", "app": "阅读应用", "ts": 2,
+	})
+	snap, _ = stream.nextData(t)
+	if snap.Pending != 1 || len(snap.Reqs) != 1 || snap.Reqs[0].ID != "r2" {
+		t.Fatalf("after surviving WriteTimeout: %+v", snap)
+	}
+
+	// 6. 心跳巡检发现 TTL 过期清理时，主动推送最新 data 快照
+	s.st.mu.Lock()
+	s.st.d.Reqs["r2"].Created = time.Now().Add(-requestTTL - time.Minute)
+	s.st.mu.Unlock()
+	snap, _ = stream.nextData(t)
+	if snap.Pending != 0 || len(snap.Reqs) != 0 {
+		t.Fatalf("after ttl gc on ping: %+v", snap)
+	}
+
+	// 7. 客户端断开后订阅表自动回收
+	stream.close()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.subMu.Lock()
+		n := len(s.subs)
+		s.subMu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("subscriber was not cleaned up after disconnect")
+}
+
+func TestAdminEventsConcurrentRace(t *testing.T) {
+	s, mux := newTestMux(t)
+	s.pingInterval = 30 * time.Millisecond
+
+	ts := httptest.NewServer(secHeaders(mux))
+	defer ts.Close()
+
+	tok := login(t, mux)
+	const subCount = 5
+	streams := make([]*sseStream, subCount)
+	for i := range subCount {
+		streams[i] = openSSE(t, ts.URL, tok)
+		// 消费首帧
+		streams[i].nextData(t)
+	}
+	defer func() {
+		for _, st := range streams {
+			st.close()
+		}
+	}()
+
+	// 后台持续消费各订阅流，验证无阻塞、无死锁、无数据竞争
+	var drainWG sync.WaitGroup
+	stopDrain := make(chan struct{})
+	for _, st := range streams {
+		drainWG.Add(1)
+		go func(st *sseStream) {
+			defer drainWG.Done()
+			for {
+				select {
+				case <-stopDrain:
+					return
+				case <-st.lines:
+				}
+			}
+		}(st)
+	}
+
+	devHdr := map[string]string{"X-Device-Token": s.devToken}
+	admHdr := map[string]string{"Authorization": "Bearer " + tok}
+
+	var wg sync.WaitGroup
+	for i := range 12 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("req-%02d", i)
+			pkg := fmt.Sprintf("com.example.p%02d", i)
+			postAPI(t, ts.URL, "/api/request", devHdr, map[string]any{
+				"id": id, "pkg": pkg, "app": "并发测试应用", "ts": i,
+			})
+			switch i % 3 {
+			case 0:
+				postAPI(t, ts.URL, "/api/admin/approve", admHdr, map[string]string{
+					"id": id, "password": "123456",
+				})
+			case 1:
+				postAPI(t, ts.URL, "/api/admin/deny", admHdr, map[string]string{"id": id})
+			case 2:
+				postAPI(t, ts.URL, "/api/cancel", devHdr, map[string]string{"id": id})
+			}
+			_ = doJSON(mux, "GET", "/api/admin/requests", tok, nil)
+		}(i)
+	}
+	wg.Wait()
+	close(stopDrain)
+	drainWG.Wait()
+
+	// 再发一条终态请求，确认所有订阅者都能最终收到包含 final 的快照
+	postAPI(t, ts.URL, "/api/request", devHdr, map[string]any{
+		"id": "final", "pkg": "com.example.final", "app": "终态校验", "ts": 99,
+	})
+	for idx, st := range streams {
+		found := false
+		deadline := time.After(2 * time.Second)
+		for !found {
+			select {
+			case line := <-st.lines:
+				if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"id":"final"`) {
+					found = true
+				}
+			case <-deadline:
+				t.Fatalf("subscriber %d did not receive final snapshot", idx)
+			}
+		}
+		st.close()
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.subMu.Lock()
+		n := len(s.subs)
+		s.subMu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("subscribers leaked after concurrent test")
 }

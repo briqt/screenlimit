@@ -1,14 +1,20 @@
 package com.briqt.screenlimit.admin;
 
 import android.app.Activity;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.TimePickerDialog;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.text.InputFilter;
 import android.text.InputType;
 import android.util.TypedValue;
@@ -50,6 +56,31 @@ public class AdminActivity extends Activity {
     private int listFilter;
     private boolean wantWatch;
     private boolean reqInFlight;
+    private LinearLayout watchDiagBox;
+
+    private final WatchService.SnapshotListener sseListener = new WatchService.SnapshotListener() {
+        @Override
+        public void onSnapshot(JSONArray latest, int pendingCount) {
+            if (Session.token(AdminActivity.this).isEmpty() || host == null) return;
+            reqs = latest == null ? new JSONArray() : latest;
+            String sig = sigOf(reqs);
+            if (tab == 0 && !sig.equals(shownReqSig)) {
+                shownReqSig = sig;
+                renderRequests();
+            }
+            if (navReq != null) {
+                navReq.setText(pendingCount > 0 ? ("待审批 · " + pendingCount) : "待审批");
+            }
+        }
+
+        @Override
+        public void onUnauthorized() {
+            if (!Session.token(AdminActivity.this).isEmpty()) {
+                toast("登录已失效，请重新登录");
+            }
+            logout();
+        }
+    };
 
     private final Runnable poll = new Runnable() {
         @Override public void run() {
@@ -69,7 +100,7 @@ public class AdminActivity extends Activity {
         else showShell();
     }
 
-    @Override protected void onNewIntent(android.content.Intent intent) {
+    @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
         if (!Session.token(this).isEmpty() && host != null && "req".equals(intent.getStringExtra("tab"))) {
@@ -80,13 +111,16 @@ public class AdminActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         if (!Session.token(this).isEmpty()) {
+            WatchService.setSnapshotListener(sseListener);
             h.removeCallbacks(poll);
             h.post(poll);
             WatchService.sync(this);
+            refreshWatchDiag();
         }
     }
 
     @Override protected void onPause() {
+        WatchService.setSnapshotListener(null);
         h.removeCallbacks(poll);
         super.onPause();
     }
@@ -258,13 +292,14 @@ public class AdminActivity extends Activity {
                     reqInFlight = false;
                     reqs = j.optJSONArray("reqs");
                     if (reqs == null) reqs = new JSONArray();
+                    WatchService.pruneHandledNotifications(this, reqs);
                     String sig = sigOf(reqs);
                     if (tab == 0 && !sig.equals(shownReqSig)) {
                         shownReqSig = sig;
                         renderRequests();
                     }
                     int n = j.optInt("pending");
-                    navReq.setText(n > 0 ? ("待审批 · " + n) : "待审批");
+                    if (navReq != null) navReq.setText(n > 0 ? ("待审批 · " + n) : "待审批");
                 });
             } catch (Api.Err e) {
                 runOnUiThread(() -> {
@@ -277,6 +312,7 @@ public class AdminActivity extends Activity {
 
     private void renderRequests() {
         if (host == null) return;
+        WatchService.pruneHandledNotifications(this, reqs);
         ScrollView sv = new ScrollView(this);
         LinearLayout root = page();
         root.addView(watchCard());
@@ -309,7 +345,8 @@ public class AdminActivity extends Activity {
         LinearLayout text = col();
         text.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView t = tv("审批提醒", 15, R.color.text_hi);
-        TextView d = tv("打开后每 30 秒看一次，有新申请就通知。关掉就只在这个页面里刷新。", 12, R.color.text_low);
+        TextView d = tv("后台实时接收解锁申请，新申请立即横幅响铃提醒；关闭则仅在本页内刷新。", 12, R.color.text_low);
+        d.setPadding(0, dp(2), dp(8), 0);
         text.addView(t);
         text.addView(d);
         Switch sw = new Switch(this);
@@ -323,11 +360,151 @@ public class AdminActivity extends Activity {
             }
             Session.setWatch(this, on);
             WatchService.sync(this);
+            refreshWatchDiag();
         });
         row.addView(text);
         row.addView(sw);
         card.addView(row);
+
+        watchDiagBox = col();
+        card.addView(watchDiagBox);
+        refreshWatchDiag();
         return card;
+    }
+
+    /** 开关下方紧凑展示 3 行保活与强提醒配置自检入口，onResume 时自动刷新。 */
+    private void refreshWatchDiag() {
+        if (watchDiagBox == null) return;
+        watchDiagBox.removeAllViews();
+        if (!Session.watch(this)) return;
+
+        WatchService.ensureChannels(this);
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean battOk = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        boolean appNotifOk = notifGranted() && (nm == null || nm.areNotificationsEnabled());
+        NotificationChannel alertCh = nm == null ? null : nm.getNotificationChannel(WatchService.CH_ALERT);
+        int alertImp = alertCh == null ? NotificationManager.IMPORTANCE_HIGH : alertCh.getImportance();
+        boolean alertDegraded = !appNotifOk || alertImp < NotificationManager.IMPORTANCE_HIGH;
+
+        NotificationChannel ongoingCh = nm == null ? null : nm.getNotificationChannel(WatchService.CH_ONGOING);
+        boolean ongoingHidden = ongoingCh != null && ongoingCh.getImportance() == NotificationManager.IMPORTANCE_NONE;
+
+        // 1. 后台不受限
+        watchDiagBox.addView(divider());
+        watchDiagBox.addView(watchConfigRow(
+                "后台不受限",
+                battOk ? "防息屏断连；国产系统可进应用设置补开无限制/自启动" : "防止息屏后被系统省电断开实时连接",
+                R.color.text_low,
+                battOk ? "已开启 · 应用设置" : "未开启 · 去设置",
+                battOk ? R.color.ok : R.color.warn,
+                v -> {
+                    if (battOk) openAppDetails();
+                    else askIgnoreBattery();
+                }));
+
+        // 2. 横幅与锁屏提醒 + 右侧紧凑「测试弹窗」按钮
+        watchDiagBox.addView(divider());
+        LinearLayout r2 = row();
+        LinearLayout left2 = col();
+        left2.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        left2.setPadding(dp(2), dp(6), dp(8), dp(6));
+        left2.setBackgroundResource(android.R.drawable.list_selector_background);
+        left2.addView(tv("横幅与锁屏提醒", 13.5f, R.color.text_hi));
+        String alertSub = !appNotifOk || alertImp == NotificationManager.IMPORTANCE_NONE
+                ? "通知已被关闭，无法弹窗 · 点此去开启"
+                : alertDegraded
+                ? "横幅优先级被降级 · 点此恢复重要提醒"
+                : "点此确认系统已开启悬浮横幅与锁屏显示";
+        left2.addView(tv(alertSub, 11.5f, alertDegraded ? R.color.danger : R.color.text_low));
+        left2.setOnClickListener(v -> openChannelSettings(WatchService.CH_ALERT));
+
+        TextView testBtn = tv("测试弹窗", 12.5f, R.color.on_primary_container);
+        testBtn.setTypeface(Typeface.DEFAULT_BOLD);
+        testBtn.setBackgroundResource(R.drawable.btn_tonal);
+        testBtn.setPadding(dp(11), dp(6), dp(11), dp(6));
+        testBtn.setOnClickListener(v -> {
+            toast("2 秒后发送测试弹窗（可立即锁屏查看效果）");
+            WatchService.scheduleTestAlert(this, 2_000L);
+        });
+        r2.addView(left2);
+        r2.addView(testBtn);
+        watchDiagBox.addView(r2);
+
+        // 3. 隐藏常驻通知
+        watchDiagBox.addView(divider());
+        watchDiagBox.addView(watchConfigRow(
+                "隐藏常驻通知",
+                "单独关掉此项即可永久不显示常驻条，不影响保活",
+                R.color.text_low,
+                ongoingHidden ? "已隐藏" : "去关闭显示",
+                ongoingHidden ? R.color.ok : R.color.primary,
+                v -> openChannelSettings(WatchService.CH_ONGOING)));
+    }
+
+    private View watchConfigRow(String title, String sub, int subCol,
+                                String actionLabel, int actionCol, View.OnClickListener click) {
+        LinearLayout r = row();
+        r.setPadding(dp(2), dp(6), dp(2), dp(6));
+        r.setBackgroundResource(android.R.drawable.list_selector_background);
+        LinearLayout left = col();
+        left.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        left.addView(tv(title, 13.5f, R.color.text_hi));
+        TextView st = tv(sub, 11.5f, subCol);
+        st.setPadding(0, dp(1), dp(8), 0);
+        left.addView(st);
+        TextView act = tv(actionLabel, 12.5f, actionCol);
+        act.setTypeface(Typeface.DEFAULT_BOLD);
+        r.addView(left);
+        r.addView(act);
+        r.setOnClickListener(click);
+        return r;
+    }
+
+    private void askIgnoreBattery() {
+        Intent[] chain = {
+                new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getPackageName())),
+                new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName()))
+        };
+        for (Intent i : chain) {
+            try {
+                startActivity(i);
+                return;
+            } catch (Exception ignored) {}
+        }
+        toast("无法打开电池优化设置，请在系统设置中手动允许后台运行");
+    }
+
+    private void openAppDetails() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Exception e) {
+            toast("无法打开应用设置");
+        }
+    }
+
+    private void openChannelSettings(String channelId) {
+        Intent[] chain = {
+                new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())
+                        .putExtra(Settings.EXTRA_CHANNEL_ID, channelId),
+                new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()),
+                new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName()))
+        };
+        for (Intent i : chain) {
+            try {
+                startActivity(i);
+                return;
+            } catch (Exception ignored) {}
+        }
+        toast("无法打开通知渠道设置");
     }
 
     private View requestCard(JSONObject o) {
@@ -393,6 +570,7 @@ public class AdminActivity extends Activity {
                 try {
                     Api.approve(this, id, pw);
                     Session.setSavedPin(this, pw);
+                    WatchService.onRequestHandled(this, id);
                     pinDraft.remove(id);
                     runOnUiThread(() -> {
                         toast("已批准（已在本机记住解锁密码）");
@@ -410,6 +588,7 @@ public class AdminActivity extends Activity {
         no.setOnClickListener(v -> new Thread(() -> {
             try {
                 Api.deny(this, id);
+                WatchService.onRequestHandled(this, id);
                 runOnUiThread(() -> {
                     toast("已拒绝");
                     fetchRequests();

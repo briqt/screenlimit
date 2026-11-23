@@ -14,10 +14,11 @@ import android.util.Log;
  * <p>为什么需要：ColorOS 的内存管理会杀掉「没加锁」的后台应用，前台服务也保不住（R1）。
  * `START_STICKY` 只在系统自己回收时补起，被一键清理 / 手动划掉这类"用户行为"杀掉时不补。
  *
- * <p>用 {@code setAndAllowWhileIdle} 而不是精确闹钟：精确闹钟在 Android 13+ 要用户单独授权，
+ * <p>使用非精确闹钟而非精确闹钟：精确闹钟在 Android 13+ 要用户单独授权，
  * 而看门狗晚几分钟无所谓——它只是兜底，正常路径是前台服务一直活着。
- * 从闹钟广播里起前台服务不受后台启动限制，因为本应用必须持有 `SYSTEM_ALERT_WINDOW`（拦截层要用），
- * 那本身就是豁免项。
+ * Android 15+ 已收紧 {@code SYSTEM_ALERT_WINDOW} 在无可见悬浮窗时的后台拉起豁免，
+ * 此处从广播拉起前台服务主要依赖「忽略电池优化」（{@code REQUEST_IGNORE_BATTERY_OPTIMIZATIONS}）
+ * 与处于活跃绑定态的无障碍服务（{@code AccessibilityService}）这两项后台启动豁免。
  */
 public class Watchdog extends BroadcastReceiver {
 

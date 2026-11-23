@@ -29,7 +29,8 @@ public class MonitorService extends Service {
     private static final int NOTIF_PREWARN = 5;
     private static final int NOTIF_CLOCK = 6;
     private static final String CH_MONITOR = "monitor";
-    private static final String CH_EVENTS = "events";
+    private static final String CH_EVENTS = "events_v2";
+    private static final String LEGACY_CH_EVENTS = "events";
     static volatile MonitorService INSTANCE;
 
     private AppCache apps;
@@ -117,6 +118,10 @@ public class MonitorService extends Service {
             }
             tickAt = android.os.SystemClock.elapsedRealtime();
             requestUsagePoll(0);
+            if (!remoteCanceled && remoteId != null) {
+                h.removeCallbacks(remotePoll);
+                h.post(remotePoll);
+            }
             h.removeCallbacks(tick);
             h.post(tick);
         }
@@ -208,6 +213,14 @@ public class MonitorService extends Service {
         return START_STICKY;
     }
 
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        Log.w(TAG, "FGS timeout: startId=" + startId + ", fgsType=" + fgsType);
+        Watchdog.schedule(this, 5_000L);
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
+    }
+
     /**
      * 最近任务里被划掉：ColorOS 不把这当"系统回收"，START_STICKY 不补，服务就真没了。
      * 这里立刻自己起回来——卡片可以被划走，守护不能停。
@@ -246,12 +259,17 @@ public class MonitorService extends Service {
 
     private void startInForeground() {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        nm.deleteNotificationChannel(LEGACY_CH_EVENTS);
         NotificationChannel ch = new NotificationChannel(CH_MONITOR, "屏幕限时守护", NotificationManager.IMPORTANCE_LOW);
         ch.setDescription("限时监控常驻通知，文案会跟着当前状态变");
         ch.setShowBadge(false);
+        ch.enableVibration(false);
+        ch.setSound(null, null);
         nm.createNotificationChannel(ch);
-        NotificationChannel ev = new NotificationChannel(CH_EVENTS, "限时提醒", NotificationManager.IMPORTANCE_DEFAULT);
-        ev.setDescription("限制即将开始、配额快用完、授权快到期、远程申请有结果时提醒一次");
+        NotificationChannel ev = new NotificationChannel(CH_EVENTS, "限时与审批提醒", NotificationManager.IMPORTANCE_HIGH);
+        ev.setDescription("限制即将开始、配额快用完、授权快到期、远程申请有结果时横幅提醒");
+        ev.enableVibration(true);
+        ev.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         nm.createNotificationChannel(ev);
 
         if (Build.VERSION.SDK_INT >= 34) {
@@ -262,12 +280,18 @@ public class MonitorService extends Service {
     }
 
     private Notification ongoing(String text) {
+        // 原生 Notification.Builder 等价于 NotificationCompat.setSilent(true) 的静默配置
         return new Notification.Builder(this, CH_MONITOR)
                 .setContentTitle("屏幕限时守护")
                 .setContentText(text)
                 .setSmallIcon(R.drawable.ic_shield)
+                .setGroup("silent_monitor")
+                .setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY)
+                .setSound((android.net.Uri) null)
+                .setVibrate(null)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
+                .setShowWhen(false)
                 .setContentIntent(openSettings())
                 .build();
     }
@@ -328,6 +352,8 @@ public class MonitorService extends Service {
                 .setSmallIcon(R.drawable.ic_shield)
                 .setContentTitle(title)
                 .setContentText(text)
+                .setCategory(Notification.CATEGORY_REMINDER)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setAutoCancel(true)
                 .setContentIntent(tap)
                 .build();
@@ -346,7 +372,8 @@ public class MonitorService extends Service {
         Intent i = getPackageManager().getLaunchIntentForPackage(pkg);
         if (i == null) return openSettings();
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        return PendingIntent.getActivity(this, 1, i,
+        int reqCode = 1000 + Math.floorMod(pkg.hashCode(), 50_000);
+        return PendingIntent.getActivity(this, reqCode, i,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 

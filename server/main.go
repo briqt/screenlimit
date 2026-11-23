@@ -15,7 +15,7 @@
 //	  POST /admin/*       审批 / 保存配置
 //
 //	管理侧 App（Authorization: Bearer，见 admin_api.go）
-//	  POST /api/admin/login · GET /api/admin/requests
+//	  POST /api/admin/login · GET /api/admin/requests · GET /api/admin/events
 //	  POST /api/admin/approve|deny · GET|POST /api/admin/config
 //
 //	PWA
@@ -122,22 +122,28 @@ func (s *store) save() {
 }
 
 // gc 清掉过期的 pending 与已经终结很久的记录。调用方须持有 mu。
-func (s *store) gc() {
+// 返回本次是否确实删除了记录，便于调用方按需落盘。
+func (s *store) gc() bool {
 	now := time.Now()
+	cleaned := false
 	for id, r := range s.d.Reqs {
 		switch r.State {
 		case statePending:
 			if now.Sub(r.Created) > requestTTL {
 				delete(s.d.Reqs, id)
+				cleaned = true
 			}
 		default:
 			if r.Password == "" && now.Sub(r.Created) > requestTTL {
 				delete(s.d.Reqs, id)
+				cleaned = true
 			} else if now.Sub(r.Created) > 2*requestTTL {
 				delete(s.d.Reqs, id)
+				cleaned = true
 			}
 		}
 	}
+	return cleaned
 }
 
 type server struct {
@@ -149,6 +155,44 @@ type server struct {
 
 	failMu sync.Mutex
 	fails  []time.Time
+
+	// SSE 审批流订阅管理。锁顺序约束：严禁在持有 st.mu 时获取 subMu。
+	subMu        sync.Mutex
+	subs         map[chan struct{}]struct{}
+	pingInterval time.Duration
+}
+
+func (s *server) subscribeAdmin() (chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	s.subMu.Lock()
+	if s.subs == nil {
+		s.subs = make(map[chan struct{}]struct{})
+	}
+	s.subs[ch] = struct{}{}
+	s.subMu.Unlock()
+	return ch, func() {
+		s.subMu.Lock()
+		delete(s.subs, ch)
+		s.subMu.Unlock()
+	}
+}
+
+func (s *server) notifyAdmin() {
+	s.notifyAdminExcept(nil)
+}
+
+func (s *server) notifyAdminExcept(skip chan struct{}) {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	for ch := range s.subs {
+		if ch == skip {
+			continue
+		}
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // logf 统一走它：提醒自己**任何时候都不要把密码写进日志**。
@@ -231,6 +275,7 @@ func (s *server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.st.save()
 	s.st.mu.Unlock()
+	s.notifyAdmin()
 	logf("新申请 id=%s pkg=%s", in.ID, in.Pkg)
 	writeJSON(w, map[string]string{"ok": "1"})
 }
@@ -241,19 +286,35 @@ func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.URL.Query().Get("id")
 	s.st.mu.Lock()
-	defer s.st.mu.Unlock()
-	s.st.gc()
+	cleaned := s.st.gc()
 	req, ok := s.st.d.Reqs[id]
 	if !ok {
+		if cleaned {
+			s.st.save()
+		}
+		s.st.mu.Unlock()
+		if cleaned {
+			s.notifyAdmin()
+		}
 		writeJSON(w, map[string]string{"state": "expired"})
 		return
 	}
-	switch req.State {
-	case stateApproved:
-		pw := req.Password
+	st := req.State
+	pw := ""
+	if st == stateApproved {
+		pw = req.Password
 		req.Password = "" // 消费一次即清空（F5.3）
 		s.st.save()
 		logf("下发授权 id=%s pkg=%s", req.ID, req.Pkg)
+	} else if cleaned {
+		s.st.save()
+	}
+	s.st.mu.Unlock()
+	if cleaned {
+		s.notifyAdmin()
+	}
+	switch st {
+	case stateApproved:
 		writeJSON(w, map[string]string{"state": string(stateApproved), "password": pw})
 	case stateDenied:
 		writeJSON(w, map[string]string{"state": string(stateDenied)})
@@ -278,6 +339,7 @@ func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	delete(s.st.d.Reqs, in.ID)
 	s.st.save()
 	s.st.mu.Unlock()
+	s.notifyAdmin()
 	writeJSON(w, map[string]string{"ok": "1"})
 }
 
@@ -453,6 +515,7 @@ func main() {
 	s := &server{
 		st: st, devToken: devToken, csrf: randHex(16),
 		cred: newAdminCred(adminUser, adminPass), jwtSecret: secret,
+		subs: make(map[chan struct{}]struct{}), pingInterval: defaultPingInterval,
 	}
 
 	mux := http.NewServeMux()

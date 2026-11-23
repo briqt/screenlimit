@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
 	"sort"
@@ -10,12 +11,18 @@ import (
 	"time"
 )
 
+const (
+	defaultPingInterval = 45 * time.Second
+	sseWriteTimeout     = 15 * time.Second
+)
+
 // 管理端 JSON API。网页继续走 Cookie + 表单 + CSRF；
 // 原生管理 App 走 Authorization: Bearer，不解析 HTML，也不受 CSRF 影响
 // （浏览器不会自动带上 Authorization 头）。
 //
 //	POST /api/admin/login      {user,password} → {token}
 //	GET  /api/admin/requests   待审批列表（不含密码）
+//	GET  /api/admin/events     待审批列表 SSE 实时推送流
 //	POST /api/admin/approve    {id,password}
 //	POST /api/admin/deny       {id}
 //	GET  /api/admin/config     当前将要下发的配置 + 设备上报的应用
@@ -24,6 +31,7 @@ import (
 func (s *server) registerAdminAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/login", s.handleAdminLogin)
 	mux.HandleFunc("/api/admin/requests", s.requireBearer(s.handleAdminRequests))
+	mux.HandleFunc("/api/admin/events", s.requireBearer(s.handleAdminEvents))
 	mux.HandleFunc("/api/admin/approve", s.requireBearer(s.handleAdminApprove))
 	mux.HandleFunc("/api/admin/deny", s.requireBearer(s.handleAdminDeny))
 	mux.HandleFunc("/api/admin/config", s.requireBearer(s.handleAdminConfig))
@@ -90,14 +98,14 @@ type reqView struct {
 	State string `json:"state"`
 }
 
-func (s *server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
+// requestsPayload 构造待审批列表快照并顺带清理过期请求；仅在确实删除了过期记录时写盘。
+func (s *server) requestsPayload() (payload map[string]any, expiredCleaned bool) {
 	s.st.mu.Lock()
-	s.st.gc()
-	var list []reqView
+	expiredCleaned = s.st.gc()
+	if expiredCleaned {
+		s.st.save()
+	}
+	list := make([]reqView, 0, len(s.st.d.Reqs))
 	pending := 0
 	for _, q := range s.st.d.Reqs {
 		if q.State == statePending {
@@ -109,13 +117,99 @@ func (s *server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 			State: string(q.State),
 		})
 	}
-	s.st.save()
 	s.st.mu.Unlock()
 	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
-	if list == nil {
-		list = []reqView{}
+	return map[string]any{"pending": pending, "reqs": list}, expiredCleaned
+}
+
+func (s *server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
 	}
-	writeJSON(w, map[string]any{"pending": pending, "reqs": list})
+	payload, cleaned := s.requestsPayload()
+	if cleaned {
+		s.notifyAdmin()
+	}
+	writeJSON(w, payload)
+}
+
+func (s *server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeAPIErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-cache, no-transform")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+
+	rc := http.NewResponseController(w)
+	writeEvent := func(payload map[string]any) error {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	ch, unsubscribe := s.subscribeAdmin()
+	defer unsubscribe()
+
+	initPayload, cleaned := s.requestsPayload()
+	if cleaned {
+		s.notifyAdminExcept(ch)
+	}
+	if err := writeEvent(initPayload); err != nil {
+		return
+	}
+
+	interval := s.pingInterval
+	if interval <= 0 {
+		interval = defaultPingInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ch:
+			payload, cleaned := s.requestsPayload()
+			if cleaned {
+				s.notifyAdminExcept(ch)
+			}
+			if err := writeEvent(payload); err != nil {
+				return
+			}
+		case <-ticker.C:
+			if payload, cleaned := s.requestsPayload(); cleaned {
+				s.notifyAdminExcept(ch)
+				if err := writeEvent(payload); err != nil {
+					return
+				}
+			} else {
+				_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+				if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+		}
+	}
 }
 
 func (s *server) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
@@ -163,12 +257,13 @@ func (s *server) adminJSONDecision(w http.ResponseWriter, r *http.Request, appro
 // 密码只写进状态、不写日志。404 表示 id 不存在，409 表示已经不是 pending。
 func (s *server) applyDecision(id, pw string, approve bool) int {
 	s.st.mu.Lock()
-	defer s.st.mu.Unlock()
 	req, ok := s.st.d.Reqs[id]
 	if !ok {
+		s.st.mu.Unlock()
 		return http.StatusNotFound
 	}
 	if req.State != statePending {
+		s.st.mu.Unlock()
 		return http.StatusConflict
 	}
 	if approve {
@@ -179,6 +274,8 @@ func (s *server) applyDecision(id, pw string, approve bool) int {
 		logf("已拒绝 id=%s pkg=%s", req.ID, req.Pkg)
 	}
 	s.st.save()
+	s.st.mu.Unlock()
+	s.notifyAdmin()
 	return http.StatusOK
 }
 

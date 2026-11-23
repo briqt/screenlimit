@@ -395,7 +395,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.st.mu.Lock()
-	s.st.gc()
+	cleaned := s.st.gc()
 	var list []pageReq
 	pending := 0
 	for _, q := range s.st.d.Reqs {
@@ -408,8 +408,13 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			State: string(q.State),
 		})
 	}
-	s.st.save()
+	if cleaned {
+		s.st.save()
+	}
 	s.st.mu.Unlock()
+	if cleaned {
+		s.notifyAdmin()
+	}
 	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
