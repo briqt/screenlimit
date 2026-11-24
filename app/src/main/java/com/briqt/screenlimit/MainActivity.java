@@ -46,8 +46,8 @@ import java.util.Map;
 /**
  * 守护端主界面，底栏三页：
  *   守护 — 实时守护状态、当前生效的临时授权（可一键提前结束）、今日使用排行（点按直改规则）、受控时段（含快捷预设）
- *   应用 — 智能排序（受控/常用第三方优先）、搜索与三态名单（单步底部抽屉改状态+配额）
- *   更多 — 防绕过、保活引导、应急使用参数、密码与远程服务器
+ *   应用 — 固定顶栏搜索与状态筛选、智能排序应用列表、单步底部抽屉改状态+配额
+ *   更多 — 防绕过与基础工具白名单、应急使用参数、后台保活、密码与远程服务器
  *
  * 全部用平台原生控件构建，无 XML 布局、无第三方 UI 依赖。
  */
@@ -63,7 +63,7 @@ public class MainActivity extends Activity {
     private LinearLayout statusBody, grantsCardWrap, grantsBody, segRow, rows, presetRow;
     private TextView statusTitle, statusDesc, listStat, lockNowBtn;
     private EditText filter;
-    private Button winStartBtn, winEndBtn, coolUseBtn, coolIntervalBtn, pwRow, srvRow, tokRow;
+    private Button winStartBtn, winEndBtn, coolUseBtn, coolIntervalBtn, batValBtn, pwRow, srvRow, tokRow;
     private View windowRows;
     private Switch master, guardSw, recentsSw;
 
@@ -87,7 +87,8 @@ public class MainActivity extends Activity {
     private int seg = F_ALL;
     private boolean showAllPerms;
     private int tab = TAB_GUARD;
-    private ScrollView pageGuard, pageApps, pageMore;
+    private ScrollView pageGuard, pageMore, appsScroll;
+    private LinearLayout pageApps;
     private LinearLayout navBar;
     private TextView tabGuard, tabApps, tabMore;
 
@@ -103,13 +104,16 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
 
         pageGuard = page(header(), statusCard(), grantsCard(), usageCard(), rulesCard());
-        pageApps = page(appsCard());
+        pageApps = appsPage();
         pageMore = page(hardenCard(), emergencyCard(), keepAliveCard(), securityCard(), footer());
 
         host = new FrameLayout(this);
-        host.addView(pageGuard);
-        host.addView(pageApps);
-        host.addView(pageMore);
+        host.addView(pageGuard, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        host.addView(pageApps, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        host.addView(pageMore, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         navBar = navBar();
         LinearLayout shell = col();
@@ -219,8 +223,8 @@ public class MainActivity extends Activity {
             navBar.setPadding(0, 0, 0, keyboard ? 0 : sysBottom);
             host.setPadding(0, 0, 0, keyboard ? ime : 0);
             if (keyboard) {
-                ScrollView cur = tab == TAB_APPS ? pageApps : tab == TAB_MORE ? pageMore : pageGuard;
-                scrollFocusIntoView(cur);
+                ScrollView cur = tab == TAB_APPS ? appsScroll : tab == TAB_MORE ? pageMore : pageGuard;
+                if (cur != null) scrollFocusIntoView(cur);
             }
             return insets;
         });
@@ -373,6 +377,7 @@ public class MainActivity extends Activity {
     }
 
     private void scrollFocusIntoView(final ScrollView sv) {
+        if (sv == null) return;
         sv.postDelayed(() -> {
             View f = sv.findFocus();
             if (f == null || f == sv) return;
@@ -388,10 +393,10 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- 顶部与概览卡片
 
     private View header() {
-        LinearLayout box = col();
         LinearLayout topRow = new LinearLayout(this);
         topRow.setOrientation(LinearLayout.HORIZONTAL);
         topRow.setGravity(Gravity.CENTER_VERTICAL);
+        topRow.setPadding(0, dp(2), 0, dp(10));
 
         TextView title = tv("屏幕限时守护", 25, R.color.text_hi);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -408,13 +413,7 @@ public class MainActivity extends Activity {
             gate();
         });
         topRow.addView(lockNowBtn);
-        box.addView(topRow);
-
-        TextView sub = tv("白名单始终可用 · 灰名单按天配额 · 临时授权按应用前台使用时长扣减",
-                12.5f, R.color.text_mid);
-        sub.setPadding(0, dp(4), 0, dp(12));
-        box.addView(sub);
-        return box;
+        return topRow;
     }
 
     private View statusCard() {
@@ -525,7 +524,7 @@ public class MainActivity extends Activity {
         LinearLayout head = rowBody();
         head.setPadding(dp(16), dp(2), dp(16), dp(6));
         head.setMinimumHeight(0);
-        usageTitle = tv("今日使用（点按应用可直接改规则）", 13, R.color.text_low);
+        usageTitle = tv("今日使用", 13, R.color.text_low);
         head.addView(usageTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         usageDesc = tv("", 11.5f, R.color.text_low);
         head.addView(usageDesc);
@@ -545,13 +544,9 @@ public class MainActivity extends Activity {
         usageDesc.setText(total < 60 ? "不到 1 分钟" : "共 " + fmtDur(total));
 
         usageBody.removeAllViews();
-        TextView phase = tv(phaseText(), 12.5f, R.color.text_mid);
-        phase.setPadding(dp(16), 0, dp(16), dp(8));
-        usageBody.addView(phase);
-
         if (list.isEmpty()) {
             TextView empty = tv("今天还没有使用记录", 12.5f, R.color.text_low);
-            empty.setPadding(dp(16), dp(6), dp(16), dp(6));
+            empty.setPadding(dp(16), dp(4), dp(16), dp(6));
             usageBody.addView(empty);
             return;
         }
@@ -573,20 +568,6 @@ public class MainActivity extends Activity {
             });
             usageBody.addView(more);
         }
-    }
-
-    private String phaseText() {
-        if (!Rules.master(this)) return "限时未启用，仅统计不限制";
-        if (Rules.inWindow(this)) {
-            int m = Rules.minutesToWindowEnd(this);
-            String cool = Rules.coolReady(this) ? "应急可用" : "应急冷却中";
-            if (m == Integer.MAX_VALUE) return "全天限制生效中 · " + cool;
-            return "限制生效中，" + Rules.fmtClock(Rules.winEnd(this)) + " 结束 · " + cool;
-        }
-        int m = Rules.minutesToWindowStart(this);
-        if (m < 0) return "限制中";
-        return "不在受控时段，" + Rules.fmtClock(Rules.winStart(this)) + " 开始限制"
-                + (m <= 60 ? "（还有 " + m + " 分钟）" : "");
     }
 
     private View usageRow(final String pkg, int sec, int max) {
@@ -668,12 +649,8 @@ public class MainActivity extends Activity {
 
         LinearLayout mrow = rowBody();
         mrow.setPadding(dp(16), 0, dp(12), 0);
-        LinearLayout mc = col();
-        TextView t1 = tv("启用限时", 16, R.color.text_hi);
-        TextView t2 = tv("关闭时所有应用不受限制", 12.5f, R.color.text_mid);
-        mc.addView(t1);
-        mc.addView(t2);
-        mrow.addView(mc, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        mrow.addView(tv("启用限时", 15, R.color.text_hi),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         master = new Switch(this);
         master.setChecked(Rules.master(this));
         master.setOnCheckedChangeListener((v, on) -> {
@@ -746,39 +723,29 @@ public class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- 应用规则页
 
-    private View appsCard() {
-        LinearLayout card = card();
+    private LinearLayout appsPage() {
+        LinearLayout page = col();
+
+        // 上方固定区：标题计数行 + 搜索框 + 4 态筛选胶囊（固定在顶部，不随下方列表滚走）
+        LinearLayout topWrap = col();
+        topWrap.setPadding(dp(16), dp(8), dp(16), dp(10));
+
+        LinearLayout topCard = card();
+        topCard.setPadding(0, dp(10), 0, dp(10));
+        topCard.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout head = rowBody();
-        head.setPadding(dp(16), dp(4), dp(16), dp(2));
+        head.setMinimumHeight(0);
+        head.setPadding(dp(16), dp(2), dp(16), dp(8));
         TextView t = tv("应用规则名单", 13, R.color.text_low);
         head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         listStat = tv("", 11.5f, R.color.text_low);
         head.addView(listStat);
-        card.addView(head);
-
-        Button seed = tonalButton("一键加白：系统基础工具（电话/短信/日历/相机等）");
-        seed.setOnClickListener(v -> {
-            int n = 0;
-            for (AppCache.App a : cache.listManageable(this)) {
-                if (a.basicTool && !Rules.isWhitelisted(this, a.pkg)) {
-                    Rules.setWhitelisted(this, a.pkg, true);
-                    n++;
-                }
-            }
-            toast(n > 0 ? "已加入 " + n + " 个基础工具" : "基础工具已全部在白名单");
-            apps = null;
-            buildRows();
-        });
-        card.addView(seed);
-
-        TextView hint = tv("常用第三方与已设配额的应用排在最前。点任意应用一步设置「始终可用 / 每日配额 / 默认禁止」。",
-                11.5f, R.color.text_low);
-        hint.setPadding(dp(16), dp(2), dp(16), dp(10));
-        card.addView(hint);
+        topCard.addView(head);
 
         filter = new EditText(this);
-        filter.setHint("🔍 搜索应用名称或包名");
+        filter.setHint("🔍 搜索应用名称");
         filter.setSingleLine(true);
         filter.setBackgroundResource(R.drawable.filter_bg);
         filter.setPadding(dp(14), dp(10), dp(14), dp(10));
@@ -789,10 +756,13 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         fp.leftMargin = dp(14);
         fp.rightMargin = dp(14);
-        card.addView(filter, fp);
+        topCard.addView(filter, fp);
         filter.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
-            public void onTextChanged(CharSequence s, int a, int b, int c) { buildRows(); }
+            public void onTextChanged(CharSequence s, int a, int b, int c) {
+                buildRows();
+                if (appsScroll != null) appsScroll.scrollTo(0, 0);
+            }
             public void afterTextChanged(Editable e) {}
         });
 
@@ -800,22 +770,54 @@ public class MainActivity extends Activity {
         segRow.setOrientation(LinearLayout.HORIZONTAL);
         HorizontalScrollView hsv = new HorizontalScrollView(this);
         hsv.setHorizontalScrollBarEnabled(false);
-        hsv.setPadding(dp(14), dp(10), dp(14), dp(4));
+        hsv.setPadding(dp(14), dp(10), dp(14), dp(2));
         hsv.setClipToPadding(false);
         hsv.addView(segRow);
-        card.addView(hsv);
+        topCard.addView(hsv);
 
-        rows = new LinearLayout(this);
-        rows.setOrientation(LinearLayout.VERTICAL);
-        card.addView(rows);
-        return card;
+        topWrap.addView(topCard);
+        page.addView(topWrap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 下方独立滚动区：仅滚动应用列表卡片
+        appsScroll = new ScrollView(this);
+        appsScroll.setFillViewport(true);
+        LinearLayout listWrap = col();
+        listWrap.setPadding(dp(16), 0, dp(16), dp(24));
+
+        LinearLayout listCard = card();
+        listCard.setPadding(0, dp(6), 0, dp(6));
+        listCard.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        rows = col();
+        listCard.addView(rows);
+        listWrap.addView(listCard);
+        appsScroll.addView(listWrap);
+
+        page.addView(appsScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        return page;
+    }
+
+    private void seedBasicTools() {
+        int n = 0;
+        for (AppCache.App a : cache.listManageable(this)) {
+            if (a.basicTool && !Rules.isWhitelisted(this, a.pkg)) {
+                Rules.setWhitelisted(this, a.pkg, true);
+                n++;
+            }
+        }
+        toast(n > 0 ? "已加入 " + n + " 个系统基础工具" : "系统基础工具已全部在白名单中");
+        apps = null;
+        buildRows();
+        refreshUsage();
     }
 
     // ---------------------------------------------------------------- 更多设置页
 
     private View hardenCard() {
         LinearLayout card = card();
-        card.addView(sectionTitle("防绕过"));
+        card.addView(sectionTitle("守护与防绕过"));
 
         guardSw = new Switch(this);
         guardSw.setChecked(Rules.guardSettings(this));
@@ -824,29 +826,33 @@ public class MainActivity extends Activity {
             if (on && !a11yOn()) toast("需要开启无障碍服务才会生效");
         });
         card.addView(switchRow("看守系统设置",
-                "限时期间拦住卸载弹窗、无障碍设置页、以及本应用和被限应用的应用信息页。依赖无障碍服务。",
+                "限时期间拦截卸载、无障碍与本应用权限页（需开启无障碍）",
                 guardSw));
+        card.addView(divider(dp(16)));
+        card.addView(settingRow("基础工具白名单",
+                "将电话、短信、相机、日历等系统工具加入白名单",
+                actionButton("一键补齐"), v -> seedBasicTools()));
         return card;
     }
 
     /** 应急使用参数设置卡（对齐管理端与网页端，支持手机本机查看与修改）。 */
     private View emergencyCard() {
         LinearLayout card = card();
-        card.addView(sectionTitle("应急使用（整机共用冷却）"));
+        card.addView(sectionTitle("应急使用"));
         coolUseBtn = valueButton();
         coolIntervalBtn = valueButton();
         card.addView(clickRow("每次应急可用时长", coolUseBtn, v -> showCoolUseDialog()));
         card.addView(divider(dp(16)));
         card.addView(clickRow("两次应急冷却间隔", coolIntervalBtn, v -> showCoolIntervalDialog()));
-        card.addView(hintText("应急时长仅在打开该应用时按秒扣减；触发一次后整机所有应用共同进入冷却间隔。"));
+        card.addView(hintText("仅在应用前台打开时扣减，用后整机进入冷却"));
         return card;
     }
 
     private View switchRow(String title, String desc, Switch sw) {
         LinearLayout r = rowBody();
-        r.setPadding(dp(16), dp(8), dp(12), dp(8));
+        r.setPadding(dp(16), dp(9), dp(12), dp(9));
         LinearLayout mid = col();
-        mid.addView(tv(title, 16, R.color.text_hi));
+        mid.addView(tv(title, 15, R.color.text_hi));
         TextView d = tv(desc, 12, R.color.text_mid);
         d.setPadding(0, dp(2), dp(8), 0);
         mid.addView(d);
@@ -855,24 +861,56 @@ public class MainActivity extends Activity {
         return r;
     }
 
+    private View settingRow(String title, String desc, Button actionBtn, View.OnClickListener l) {
+        LinearLayout r = rowBody();
+        r.setPadding(dp(16), dp(9), actionBtn != null ? dp(2) : dp(16), dp(9));
+        if (l != null) {
+            clickable(r);
+            r.setOnClickListener(l);
+        }
+        LinearLayout mid = col();
+        mid.addView(tv(title, 15, R.color.text_hi));
+        TextView d = tv(desc, 12, R.color.text_mid);
+        d.setPadding(0, dp(2), actionBtn != null ? dp(8) : 0, 0);
+        mid.addView(d);
+        r.addView(mid, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (actionBtn != null) r.addView(actionBtn);
+        return r;
+    }
+
+    private Button actionButton(String text) {
+        Button b = valueButton();
+        b.setText(text);
+        b.setTextColor(c(R.color.primary));
+        return b;
+    }
+
+    private void syncBatteryBtn() {
+        if (batValBtn == null) return;
+        boolean ok = batteryOk();
+        batValBtn.setText(ok ? "已开启" : "去设置");
+        batValBtn.setTextColor(c(ok ? R.color.ok : R.color.primary));
+    }
+
     private View keepAliveCard() {
         LinearLayout card = card();
-        card.addView(sectionTitle("保活（被杀就守不住）"));
+        card.addView(sectionTitle("后台保活"));
 
-        Button startupVal = valueButton();
-        startupVal.setText("去设置");
-        card.addView(clickRow("允许自启动", startupVal, v -> openStartupManager()));
-        card.addView(hintText("厂商的自启动管理默认不放行，不开的话重启手机后守护不会自己起来。"));
+        card.addView(settingRow("允许自启动",
+                "防止重启后守护无法自动拉起",
+                actionButton("去设置"), v -> openStartupManager()));
         card.addView(divider(dp(16)));
 
-        Button batVal = valueButton();
-        batVal.setText(batteryOk() ? "已允许" : "去设置");
-        card.addView(clickRow("后台不受限", batVal, v -> askBattery()));
-        card.addView(hintText("ColorOS 还要在「设置 → 电池 → 耗电管理」里把本应用选成「完全允许后台行为」。"));
+        batValBtn = actionButton("");
+        syncBatteryBtn();
+        card.addView(settingRow("后台不受限",
+                "电池耗电管理需设为完全允许后台行为",
+                batValBtn, v -> askBattery()));
         card.addView(divider(dp(16)));
 
-        card.addView(hintText("最近任务里长按本应用的卡片 → 加锁。没加锁的应用是内存管理第一个清掉的，"
-                + "而加了锁一键清理清不掉。"));
+        card.addView(settingRow("最近任务加锁",
+                "在多任务界面长按本应用卡片加锁，防一键清理",
+                null, null));
         card.addView(divider(dp(16)));
 
         recentsSw = new Switch(this);
@@ -882,8 +920,8 @@ public class MainActivity extends Activity {
             applyHideRecents(on);
             toast(on ? "卡片已从最近任务里藏起" : "卡片已恢复显示");
         });
-        card.addView(switchRow("隐藏后台",
-                "把本应用的卡片从最近任务里摘掉。请先加锁、再打开这个开关。",
+        card.addView(switchRow("隐藏后台卡片",
+                "先加锁再开启，从多任务列表中隐藏卡片",
                 recentsSw));
         return card;
     }
@@ -1064,6 +1102,7 @@ public class MainActivity extends Activity {
 
         boolean on = Rules.master(this);
         boolean inWin = Rules.inWindow(this);
+        String cool = !Rules.coolReady(this) ? " · 应急冷却中" : "";
         String advice = missOpt > 0 ? " · " + missOpt + " 项建议未开启" : "";
         if (missReq > 0) {
             statusTitle.setText("还有 " + missReq + " 项必需权限未完成");
@@ -1072,15 +1111,15 @@ public class MainActivity extends Activity {
         } else if (!on) {
             statusTitle.setText("已就绪，未启用限时");
             statusTitle.setTextColor(c(R.color.text_hi));
-            statusDesc.setText("打开下方「启用限时」即开始守护" + advice);
+            statusDesc.setText("打开下方「启用限时」即开始守护" + cool + advice);
         } else if (!inWin) {
             statusTitle.setText("已启用 · 当前不在受控时段");
             statusTitle.setTextColor(c(R.color.warn));
-            statusDesc.setText(windowText() + " 之外不作限制" + advice);
+            statusDesc.setText(windowText() + " 之外不作限制" + cool + advice);
         } else {
             statusTitle.setText("● 正在守护中");
             statusTitle.setTextColor(c(R.color.ok));
-            statusDesc.setText("生效时段：" + windowText() + advice);
+            statusDesc.setText("生效时段：" + windowText() + cool + advice);
         }
 
         statusBody.removeAllViews();
@@ -1163,6 +1202,7 @@ public class MainActivity extends Activity {
         buildWindowPresets();
         if (coolUseBtn != null) coolUseBtn.setText(Rules.coolUseMin(this) + " 分钟");
         if (coolIntervalBtn != null) coolIntervalBtn.setText(Rules.coolIntervalMin(this) + " 分钟");
+        syncBatteryBtn();
         pwRow.setText(Rules.hasPassword(this) ? "已设置" : "未设置");
         srvRow.setText(TextUtils.isEmpty(Rules.serverAddr(this)) ? "未设置" : Rules.serverAddr(this));
         tokRow.setText(TextUtils.isEmpty(Rules.deviceToken(this)) ? "未设置" : "已设置");
@@ -1232,7 +1272,7 @@ public class MainActivity extends Activity {
                 default: nd++;
             }
         }
-        listStat.setText("共 " + apps.size() + " 个应用");
+        listStat.setText("共 " + apps.size() + " 个");
         buildSegments(apps.size(), nw, ng, nd);
 
         String q = filter == null ? "" : filter.getText().toString().trim().toLowerCase();
@@ -1283,6 +1323,7 @@ public class MainActivity extends Activity {
         t.setOnClickListener(v -> {
             seg = which;
             buildRows();
+            if (appsScroll != null) appsScroll.scrollTo(0, 0);
         });
         return t;
     }
@@ -1333,7 +1374,7 @@ public class MainActivity extends Activity {
         } else if (app.system) {
             sb.append("系统应用");
         } else {
-            sb.append(app.pkg);
+            sb.append("第三方应用");
         }
         return sb.toString();
     }
@@ -1378,7 +1419,7 @@ public class MainActivity extends Activity {
         bg.setColor(c(R.color.surface_container));
         box.setBackground(bg);
 
-        // 头部：图标 + 应用名 + 包名/今日用量
+        // 头部：图标 + 应用名 + 今日用量
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
@@ -1396,8 +1437,8 @@ public class MainActivity extends Activity {
         TextView title = tv(app.label, 18, R.color.text_hi);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         int statSec = Rules.statSecondsToday(this, app.pkg);
-        String statStr = statSec < 60 ? "今日基本未用" : ("今日已使用 " + fmtDur(statSec));
-        TextView sub = tv(statStr + " · " + app.pkg, 11.5f, R.color.text_low);
+        String statStr = statSec < 60 ? "今日尚未使用" : ("今日已使用 " + fmtDur(statSec));
+        TextView sub = tv(statStr, 12, R.color.text_mid);
         hText.addView(title);
         hText.addView(sub);
         head.addView(hText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -1884,24 +1925,6 @@ public class MainActivity extends Activity {
         body.addView(valueBtn);
         body.setOnClickListener(l);
         return body;
-    }
-
-    private Button tonalButton(String s) {
-        Button b = new Button(this);
-        b.setAllCaps(false);
-        b.setText(s);
-        b.setTextSize(13.5f);
-        b.setTextColor(c(R.color.on_primary_container));
-        b.setBackgroundResource(R.drawable.btn_tonal);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.leftMargin = dp(14);
-        lp.rightMargin = dp(14);
-        lp.topMargin = dp(4);
-        lp.bottomMargin = dp(2);
-        b.setLayoutParams(lp);
-        b.setPadding(dp(10), dp(9), dp(10), dp(9));
-        return b;
     }
 
     // ---------------------------------------------------------------- 权限探测
